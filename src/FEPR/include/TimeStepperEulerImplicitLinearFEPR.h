@@ -77,9 +77,20 @@ namespace Gauss {
 template<typename DataType, typename MatrixAssembler, typename VectorAssembler>
 template<typename World>
 void TimeStepperImplEulerImplicitLinearFEPR<DataType, MatrixAssembler, VectorAssembler>::step(World &world, double dt, double t) {
+    // This is an implementation of the FEPR method introduced in paper
+    // FEPR: Fast Energy Projection for Real-Time Simulation of Deformable Objects
+    // https://www.cs.utah.edu/~ladislav/dinev18FEPR/dinev18FEPR.pdf. This implementation chooses
+    // to preserve the total energy, which is kinect energy + potential energy. Details are commented
+    // below for each steps. However, it seems like the constraint term doesn't actually converge
+    // to the actual energy in the previous step (That's why I break the iteration only when ||c(q)||_1 < 1e-1). Also, when I remove the strain energy and try to 
+    // simply preserve kinect + body force energy, it doesn't work at all. I am still seeking for the bug (or possibly the reason)
+    
+
+    // To get all necessary information before the update
     Eigen::VectorXd x_ref = mapStateEigen<0>(world);
     Eigen::VectorXd geo_x(x_ref.rows());
     Eigen::MatrixXd V(x_ref.rows() / 3, 3);
+    /* To get the geometry of the object in order to do projection*/
     int idx = 0;
     forEachIndex(world.getSystemList(), [&world, &geo_x, &idx](auto type, auto index, auto &a) {
         Eigen::MatrixXd geo = a->getGeometry().first;
@@ -93,6 +104,7 @@ void TimeStepperImplEulerImplicitLinearFEPR<DataType, MatrixAssembler, VectorAss
     Eigen::VectorXd v_cur = mapStateEigen<1>(world);
     double energy_cur = getEnergy(world);
 
+    // This parts are the original implementation, haven't touch
     Eigen::SparseMatrix<DataType, Eigen::RowMajor> systemMatrix;
     Eigen::VectorXd x0;
 
@@ -176,6 +188,7 @@ void TimeStepperImplEulerImplicitLinearFEPR<DataType, MatrixAssembler, VectorAss
     qDot = x0.head(world.getNumQDotDOFs());
 
     m_lagrangeMultipliers = x0.tail(world.getNumConstraints());
+    // The original implementation ends here.
 
     // get mass matrix
     AssemblerEigenSparseMatrix<double> M;
@@ -185,10 +198,12 @@ void TimeStepperImplEulerImplicitLinearFEPR<DataType, MatrixAssembler, VectorAss
     // Update world state
     updateState(world, world.getState(), dt);
     
+    // get all neccessary information after the update
     Eigen::VectorXd x_next = geo_x + mapStateEigen<0>(world);
     Eigen::VectorXd v_next = mapStateEigen<1>(world);
     double energy_next = getEnergy(world);
 
+    // Initialize variables before the projection
     Eigen::VectorXd x = x_next;
     Eigen::VectorXd v = v_next;
     double S = 0;
@@ -196,6 +211,7 @@ void TimeStepperImplEulerImplicitLinearFEPR<DataType, MatrixAssembler, VectorAss
     Eigen::VectorXd q_iter(x_next.rows() + v_next.rows() + 2);
     q_iter << x, v, S, T;
 
+    /* Building up the D matrix described in paper*/
     Eigen::SparseMatrix<double, Eigen::ColMajor> D(q_iter.rows(), q_iter.rows());
     double h = dt;
     double C = 0.01;
@@ -204,7 +220,6 @@ void TimeStepperImplEulerImplicitLinearFEPR<DataType, MatrixAssembler, VectorAss
                + pow(0.5 * (V.col(1).maxCoeff() - V.col(1).minCoeff()), 2)
                + pow(0.5 * (V.col(2).maxCoeff() - V.col(2).minCoeff()), 2);
     double eps = C * m * r_2;
-
     Eigen::SparseMatrix<double, Eigen::RowMajor> Dtemp1(q_iter.rows(), massMatrix.cols());
     Dtemp1.topRows(massMatrix.rows()) = massMatrix;
     Eigen::SparseMatrix<double, Eigen::ColMajor> Dtemp1_col(Dtemp1);
@@ -217,7 +232,9 @@ void TimeStepperImplEulerImplicitLinearFEPR<DataType, MatrixAssembler, VectorAss
     D.leftCols(Dtemp1_col.cols()) = Dtemp1_col;
     D.middleCols(Dtemp1_col.cols(), Dtemp2_col.cols()) = Dtemp2_col;
     D.rightCols(Dtemp3_col.cols()) = Dtemp3_col;
+    /* Finish building D */
     
+    /* get the gradient of S and T, doesn't change at all so don't have to do it in the loop */
     Eigen::Vector3d sgrad;
     sgrad << 0, 0, 0;
     for(int i = 0; i < v.rows() / 3; i++)
@@ -245,14 +262,18 @@ void TimeStepperImplEulerImplicitLinearFEPR<DataType, MatrixAssembler, VectorAss
         v_cur_i << v_cur(3 * i + 0), v_cur(3 * i + 1), v_cur(3 * i + 2);
         tgrad -= m_i * (x_cur_i.cross(v_cur_i) - x_next_i.cross(v_next_i));
     }
+    /* Finish building gradient of S and T */
     
-    for (int i = 0; i < 1000000; i++) {
+    // Starting the projection
+    for (;;) {
+        /* get information for each iteration */
         x = q_iter.block(0, 0, x.rows(), 1);
         v = q_iter.block(x.rows(), 0, v.rows(), 1);
         S = q_iter(x.rows() + v.rows());
         T = q_iter(x.rows() + v.rows() + 1);
         double energy_iter = getEnergy(world);
         
+        /* Building up the gradients of the constraints for linear momentum and angular momentum */
         Eigen::SparseMatrix<double, Eigen::ColMajor> gradP(x.rows() + v.rows() + 2, 3);
         Eigen::SparseMatrix<double, Eigen::ColMajor> gradL(x.rows() + v.rows() + 2, 3);
         typedef Eigen::Triplet<double> Triplet;
@@ -303,19 +324,21 @@ void TimeStepperImplEulerImplicitLinearFEPR<DataType, MatrixAssembler, VectorAss
         gradLTripletList.push_back(Triplet(x.rows() + v.rows() + 1, 2, tgrad(2)));
         gradL.setFromTriplets(gradLTripletList.begin(), gradLTripletList.end());
 
+        /* Gradient for the energy constraint */
         Eigen::VectorXd gradH(x.rows() + v.rows() + 2);
         AssemblerEigenVector<double> force;
         getForceVector(force, world);
         Eigen::VectorXd gradPotential = -(*force);
         gradH << gradPotential, massMatrix * v, 0, 0;
         
+        /* Gradient for the entire constraint */
         Eigen::MatrixXd gradC(gradP.rows(), gradP.cols() + gradL.cols() + gradH.cols());
         gradC.leftCols(gradH.cols()) = gradH;
         gradC.middleCols(1, gradP.cols()) = gradP.toDense();
         gradC.rightCols(gradL.cols()) = gradL.toDense();
         
-        ///////////////////////////////////////////////
 
+        /* Linear momentum constraint */
         Eigen::Vector3d p;
         p << 0, 0, 0;
         for (int i = 0; i < v.rows() / 3; i++)
@@ -330,6 +353,7 @@ void TimeStepperImplEulerImplicitLinearFEPR<DataType, MatrixAssembler, VectorAss
             p += m_i * ((v_i - v_i_next) - S * (v_i_cur - v_i_next));
         }
         
+        /* Angular momentum constraint */
         Eigen::Vector3d l;
         l << 0, 0, 0;
         for (int i = 0; i < x.rows() / 3; i++)
@@ -349,8 +373,12 @@ void TimeStepperImplEulerImplicitLinearFEPR<DataType, MatrixAssembler, VectorAss
             x_i_cur << x_cur(3 * i), x_cur(3 * i + 1), x_cur(3 * i + 2);
             l += m_i * ((x_i.cross(v_i) - x_i_next.cross(v_i_next)) - T * (x_i_cur.cross(v_i_cur) - x_i_next.cross(v_i_next)));
         }
+
+        /* Entire constraint */
         Eigen::VectorXd c(7);
         c << energy_iter - energy_cur, p(0), p(1), p(2), l(0), l(1), l(2);
+        
+        // Temporary solver to solve for D^-1 * gradC
         Eigen::SparseLU<Eigen::SparseMatrix<double, Eigen::ColMajor>> tmpSolver;
         tmpSolver.compute(D);
         if(tmpSolver.info()!=Eigen::Success) {
@@ -360,11 +388,13 @@ void TimeStepperImplEulerImplicitLinearFEPR<DataType, MatrixAssembler, VectorAss
         Eigen::MatrixXd D_inv_times_gradC(D.rows(), gradC.cols());
         D_inv_times_gradC = tmpSolver.solve(gradC);
 
+        /* The 7x7 dense matrix */
         Eigen::MatrixXd lambdaLinearMat(gradC.cols(), D_inv_times_gradC.cols());
         lambdaLinearMat = Eigen::MatrixXd(gradC.transpose() * D_inv_times_gradC);
         Eigen::VectorXd lambda(lambdaLinearMat.rows());
         lambda = lambdaLinearMat.ldlt().solve(c);
 
+        /* Update q and state*/
         q_iter = q_iter - D_inv_times_gradC * lambda;
         mapStateEigen<0>(world) = q_iter.block(0, 0, x.rows(), 1) - geo_x;
         mapStateEigen<1>(world) = q_iter.block(x.rows(), 0, v.rows(), 1);
