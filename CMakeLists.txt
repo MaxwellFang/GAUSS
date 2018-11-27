@@ -212,6 +212,7 @@ add_subdirectory(${PROJECT_SOURCE_DIR}/src/Embeddings)
 add_subdirectory(${PROJECT_SOURCE_DIR}/src/EigenFit)
 add_subdirectory(${PROJECT_SOURCE_DIR}/src/Collisions)
 add_subdirectory(${PROJECT_SOURCE_DIR}/src/RigidBodies)
+add_subdirectory(${PROJECT_SOURCE_DIR}/src/FEPR)
 
 #UI package has to come last
 if(GAUSS_USE_UI)

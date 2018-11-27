@@ -36,6 +36,9 @@ add_executable(ExampleRigidBody exampleRigidBody.cpp)
 
 #add_executable(ExampleFloatingFrame exampleFloatingFrame.cpp)
 
+add_executable(ExampleFEPR exampleFEPR.cpp)
+target_link_libraries(ExampleFEPR Core Base FEM UI ${GAUSS_LIBS})
+
 target_link_libraries(Example1 Core Base UI ${GAUSS_LIBS})
 target_link_libraries(Example2 Core Base FEM UI ${GAUSS_LIBS})
 target_link_libraries(Example3 Core Base FEM UI ${GAUSS_LIBS})

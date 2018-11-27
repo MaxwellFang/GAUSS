@@ -27,6 +27,7 @@
 #include <stdexcept>
 
 //some useful types
+
 namespace Eigen {
     template<typename DataType>
     using Vector3x = Eigen::Matrix<DataType, 3,1>;
